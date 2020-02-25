@@ -3,39 +3,57 @@
   homebrew: name=mas state=present
 
 - name: Get MAS account status
-  command: mas account
+  shell: mas account
   register: mas_account_result
   failed_when: mas_account_result.rc > 1
   changed_when: false
 
 - name: Sign in to MAS when email and password are provided.
-  command: 'mas signin "{{ mas_email }}" "{{ mas_password }}"'
+  shell: 'mas signin "{{ mas_email }}" "{{ mas_password }}"'
   register: mas_signin_result
   when:
     - mas_account_result.rc == 1
-    - mas_email | bool
-    - mas_password | bool
+    - mas_email | ternary(True, False) 
+    - mas_password | ternary(True, False) 
     - not mas_signin_dialog
+    - ansible_os_family == "Darwin"
+    - ansible_osrevision < 199506
 
 - name: Sign in to MAS when email is provided, and complete password and 2FA using dialog.
-  command: 'mas signin "{{ mas_email }}" "{{ mas_password }}" --dialog'
+  shell: 'mas signin "{{ mas_email }}" "{{ mas_password }}" --dialog'
   register: mas_signin_result
   when:
     - mas_signin_dialog
     - mas_account_result.rc == 1
-    - mas_email | bool
+    - mas_email | ternary(True, False) 
+    - ansible_os_family == "Darwin"
+    - ansible_osrevision < 199506
 
 - name: List installed MAS apps.
-  command: mas list
+  shell: mas list | cut -d' ' -f1
   register: mas_list
   check_mode: false
   changed_when: false
 
+- name: Identify MAS apps to install
+  set_fact: 
+    mas_to_install: "{{ (mas_installed_apps | difference(mas_installed_apps | json_query('[].{id:id,name:name}'))) | union(mas_installed_apps | json_query('[].id')) | union(mas_installed_app_ids)}}"
+
+- name: Identify MAS apps to uninstall
+  set_fact: 
+    mas_to_uninstall: "{{ (mas_uninstall_apps | difference(mas_uninstall_apps | json_query('[].{id:id,name:name}'))) | union(mas_uninstall_apps | json_query('[].id')) }}"
+
 - name: Ensure configured MAS apps are installed.
-  command: mas install "{{ item.id|default(item) }}"
-  with_items: "{{ mas_installed_apps + mas_installed_app_ids }}"
-  when: (item.id | default(item) | string) not in mas_list.stdout
+  shell: mas install "{{ item }}"
+  with_items: "{{ mas_to_install| difference(mas_to_uninstall) }}"
+  when: (item|string) not in mas_list.stdout_lines
+
+- name: Uninstall MAS apps.
+  become: yes
+  shell: mas uninstall "{{ item }}"
+  with_items: "{{ mas_to_uninstall }}"
+  when: (item|string) in ( mas_list.stdout_lines | union(mas_to_install | difference(mas_uninstall_apps)))
 
 - name: Upgrade all apps (if configured).
-  command: mas upgrade
+  shell: mas upgrade
   when: mas_upgrade_all_apps
